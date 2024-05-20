@@ -1,60 +1,69 @@
-import scrapy
 import json
-from urllib.parse import urljoin
+import scrapy
+from scrapy.http import HtmlResponse
 
 class AgentsSpider(scrapy.Spider):
-    name = 'agents'
-    allowed_domains = ['bhhsamb.com']
+    name = "agents"
+    allowed_domains = ["bhhsamb.com"]
     start_urls = [
-        'https://www.bhhsamb.com/CMS/CmsRoster/RosterSearchResults?layoutID=963&pageSize=10&pageNumber=1&sortBy=random'
+        "https://www.bhhsamb.com/CMS/CmsRoster/RosterSearchResults?layoutID=963&pageSize=10&pageNumber=1&sortBy=random"
     ]
 
     def parse(self, response):
-        # Log the status code
         self.logger.debug(f"Response status: {response.status}")
-
-        # Log headers
         self.logger.debug(f"Response headers: {response.headers}")
 
-        # Check content type
         content_type = response.headers.get('Content-Type').decode('utf-8')
         if 'application/json' not in content_type:
             self.logger.error(f"Unexpected content type: {content_type}")
             self.logger.debug(f"Response text: {response.text}")
             return
 
-        # Try to parse the JSON response
         try:
             data = json.loads(response.text)
-            self.logger.debug(f"Parsed JSON data: {data}")
         except json.JSONDecodeError as e:
             self.logger.error(f"Failed to decode JSON response: {e}")
             self.logger.debug(f"Response text: {response.text}")
             return
 
-        # Check if 'Html' key is in the JSON response
-        html_content = data.get('Html')
+        self.logger.debug(f"Parsed JSON data: {data}")
+
+        if not isinstance(data, dict):
+            self.logger.error("Parsed data is not a dictionary")
+            self.logger.debug(f"Data: {data}")
+            return
+
+        html_content = data.get('Html', '')
         if not html_content:
-            self.logger.error("'Html' key is missing in the JSON response")
+            self.logger.error("No 'Html' content found in the data")
             self.logger.debug(f"JSON data: {data}")
             return
 
-        # Parse HTML content to extract agent profile URLs
-        yield from self.parse_office_roster(response, html_content)
+        html_response = HtmlResponse(url=response.url, body=html_content, encoding='utf-8')
 
-    def parse_office_roster(self, response, html_content):
-        # Parse the HTML content to extract agent profile URLs
-        selector = scrapy.Selector(text=html_content)
-        agent_links = selector.css('a.cms-int-roster-card-image-container')
-        base_url = "https://www.bhhsamb.com"
-        
         # Extract profile URLs for each agent
-        for agent_link in agent_links:
-            profile_url = agent_link.css('a::attr(href)').get()
-            if profile_url:
-                full_url = urljoin(base_url, profile_url)
-                self.logger.debug(f"Following agent profile URL: {full_url}")
-                yield response.follow(full_url, self.parse_profile)
+        profile_urls = []
+        articles = html_response.css('article')
+        for article in articles:
+            # Find the <a> tag within each <article>
+            agent_link = article.css('.cms-int-roster-card-image-container.site-roster-card-image-link::attr(href)').get()
+            if agent_link:
+                profile_urls.append(agent_link)
+
+        # Print the extracted profile URLs
+        self.logger.info(f"Found {len(profile_urls)} profile URLs")
+        for profile_url in profile_urls:
+            full_profile_url = response.urljoin(profile_url)
+            self.logger.info(f"Found Profile URL: {full_profile_url}")
+            yield scrapy.Request(url=full_profile_url, callback=self.parse_profile)
+
+        total_count = data.get('TotalCount', 0)
+        current_page = int(response.url.split('pageNumber=')[-1].split('&')[0])
+        page_size = 10
+        if current_page * page_size < total_count:
+            next_page = current_page + 1
+            next_page_url = f"https://www.bhhsamb.com/CMS/CmsRoster/RosterSearchResults?layoutID=963&pageSize=10&pageNumber={next_page}&sortBy=random"
+            yield scrapy.Request(url=next_page_url, callback=self.parse)
 
     def parse_profile(self, response):
         item = {}
@@ -79,5 +88,4 @@ class AgentsSpider(scrapy.Spider):
         item['languages'] = [language.strip() for language in response.xpath('//div[@class="agent-languages"]/text()').getall() if language.strip()]
         item['description'] = response.xpath('//div[@class="agent-description"]/text()').get(default='').strip()
 
-        self.logger.debug(f"Scraped agent profile: {item}")
         yield item
